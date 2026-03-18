@@ -6,6 +6,40 @@ from src.api.routes import settings
 from src.infrastructure.config.env_manager import env_manager
 
 
+_SETTINGS_ENV_KEYS = [
+    "ACCOUNT_ROTATION_ENABLED",
+    "ACCOUNT_ROTATION_MODE",
+    "ACCOUNT_ROTATION_RETRY_LIMIT",
+    "ACCOUNT_BLACKLIST_TTL",
+    "ACCOUNT_STATE_DIR",
+    "PROXY_ROTATION_ENABLED",
+    "PROXY_ROTATION_MODE",
+    "PROXY_POOL",
+    "PROXY_ROTATION_RETRY_LIMIT",
+    "PROXY_BLACKLIST_TTL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL_NAME",
+    "SKIP_AI_ANALYSIS",
+    "PROXY_URL",
+    "NTFY_TOPIC_URL",
+    "GOTIFY_URL",
+    "GOTIFY_TOKEN",
+    "BARK_URL",
+    "WX_BOT_URL",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "TELEGRAM_API_BASE_URL",
+    "WEBHOOK_URL",
+    "WEBHOOK_METHOD",
+    "WEBHOOK_HEADERS",
+    "WEBHOOK_CONTENT_TYPE",
+    "WEBHOOK_QUERY_PARAMETERS",
+    "WEBHOOK_BODY",
+    "PCURL_TO_MOBILE",
+]
+
+
 class _IdleProcessService:
     def __init__(self) -> None:
         self.processes = {}
@@ -18,7 +52,13 @@ def _build_settings_client() -> TestClient:
     return TestClient(app)
 
 
+def _clear_settings_env(monkeypatch) -> None:
+    for key in _SETTINGS_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_rotation_settings_include_account_rotation_fields(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
@@ -68,6 +108,7 @@ def test_rotation_settings_include_account_rotation_fields(tmp_path, monkeypatch
 
 
 def test_notification_settings_redact_sensitive_values_and_expose_flags(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
@@ -79,6 +120,7 @@ def test_notification_settings_redact_sensitive_values_and_expose_flags(tmp_path
                 "WX_BOT_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret",
                 "TELEGRAM_BOT_TOKEN=telegram-secret",
                 "TELEGRAM_CHAT_ID=123456",
+                "TELEGRAM_API_BASE_URL=https://tg.example.com/proxy",
                 "WEBHOOK_URL=https://hooks.example.com/notify?token=secret",
                 'WEBHOOK_HEADERS={"Authorization":"Bearer secret"}',
                 'WEBHOOK_BODY={"message":"{{content}}"}',
@@ -96,6 +138,7 @@ def test_notification_settings_redact_sensitive_values_and_expose_flags(tmp_path
     assert payload["NTFY_TOPIC_URL"] == "https://ntfy.sh/demo-topic"
     assert payload["GOTIFY_URL"] == "https://gotify.example.com"
     assert payload["TELEGRAM_CHAT_ID"] == "123456"
+    assert payload["TELEGRAM_API_BASE_URL"] == "https://tg.example.com/proxy"
     assert payload["BARK_URL"] == ""
     assert payload["WX_BOT_URL"] == ""
     assert payload["GOTIFY_TOKEN"] == ""
@@ -112,6 +155,7 @@ def test_notification_settings_redact_sensitive_values_and_expose_flags(tmp_path
 
 
 def test_update_notification_settings_rejects_invalid_channel_config(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
     monkeypatch.setattr(env_manager, "env_file", env_file)
@@ -123,6 +167,13 @@ def test_update_notification_settings_rejects_invalid_channel_config(tmp_path, m
     )
     assert gotify_response.status_code == 422
     assert "GOTIFY_TOKEN" in gotify_response.text
+
+    telegram_proxy_response = client.put(
+        "/api/settings/notifications",
+        json={"TELEGRAM_API_BASE_URL": "not-a-url"},
+    )
+    assert telegram_proxy_response.status_code == 422
+    assert "TELEGRAM_API_BASE_URL" in telegram_proxy_response.text
 
     webhook_response = client.put(
         "/api/settings/notifications",
@@ -138,6 +189,7 @@ def test_update_notification_settings_rejects_invalid_channel_config(tmp_path, m
 
 
 def test_system_status_includes_notification_channel_flags(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
@@ -172,12 +224,14 @@ def test_system_status_includes_notification_channel_flags(tmp_path, monkeypatch
 
 
 def test_notification_test_endpoint_merges_stored_secret_values(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
             [
                 "TELEGRAM_BOT_TOKEN=stored-token",
                 "TELEGRAM_CHAT_ID=10001",
+                "TELEGRAM_API_BASE_URL=https://tg-proxy.example.com/base",
             ]
         ),
         encoding="utf-8",
@@ -216,5 +270,123 @@ def test_notification_test_endpoint_merges_stored_secret_values(tmp_path, monkey
     assert response.status_code == 200
     payload = response.json()
     assert payload["results"]["telegram"]["success"] is True
-    assert captured["url"].endswith("/botstored-token/sendMessage")
+    assert captured["url"] == "https://tg-proxy.example.com/base/botstored-token/sendMessage"
     assert captured["json"]["chat_id"] == "20002"
+
+
+def test_ai_settings_fall_back_to_runtime_environment_when_env_file_missing(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    monkeypatch.setenv("OPENAI_API_KEY", "runtime-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://runtime.example.com/v1")
+    monkeypatch.setenv("OPENAI_MODEL_NAME", "runtime-model")
+    monkeypatch.setenv("PROXY_URL", "http://127.0.0.1:7890")
+    client = _build_settings_client()
+
+    ai_response = client.get("/api/settings/ai")
+    assert ai_response.status_code == 200
+    assert ai_response.json() == {
+        "OPENAI_BASE_URL": "https://runtime.example.com/v1",
+        "OPENAI_MODEL_NAME": "runtime-model",
+        "SKIP_AI_ANALYSIS": False,
+        "PROXY_URL": "http://127.0.0.1:7890",
+    }
+
+    status_response = client.get("/api/settings/status")
+    assert status_response.status_code == 200
+    env_payload = status_response.json()["env_file"]
+    assert env_payload["exists"] is False
+    assert env_payload["openai_api_key_set"] is True
+    assert env_payload["openai_base_url_set"] is True
+    assert env_payload["openai_model_name_set"] is True
+
+
+def test_notification_settings_fall_back_to_runtime_environment_when_env_file_missing(
+    tmp_path, monkeypatch
+):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    monkeypatch.setenv("NTFY_TOPIC_URL", "https://ntfy.sh/runtime-topic")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "runtime-telegram-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "20001")
+    monkeypatch.setenv("TELEGRAM_API_BASE_URL", "https://runtime-tg-proxy.example.com")
+    monkeypatch.setenv("BARK_URL", "https://api.day.app/runtime-secret/")
+    client = _build_settings_client()
+
+    response = client.get("/api/settings/notifications")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["NTFY_TOPIC_URL"] == "https://ntfy.sh/runtime-topic"
+    assert payload["TELEGRAM_CHAT_ID"] == "20001"
+    assert payload["TELEGRAM_API_BASE_URL"] == "https://runtime-tg-proxy.example.com"
+    assert payload["BARK_URL"] == ""
+    assert payload["BARK_URL_SET"] is True
+    assert payload["TELEGRAM_BOT_TOKEN_SET"] is True
+    assert sorted(payload["CONFIGURED_CHANNELS"]) == ["bark", "ntfy", "telegram"]
+
+
+def test_ai_test_endpoint_falls_back_to_responses_when_chat_completions_api_404(
+    tmp_path, monkeypatch
+):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+    request_history = []
+
+    class _FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.responses = type(
+                "_Responses",
+                (),
+                {"create": self._responses_create},
+            )()
+            self.chat = type(
+                "_Chat",
+                (),
+                {
+                    "completions": type(
+                        "_Completions",
+                        (),
+                        {"create": self._chat_create},
+                    )()
+                },
+            )()
+
+        def _responses_create(self, **kwargs):
+            request_history.append(("responses", kwargs))
+            return type(
+                "_Response",
+                (),
+                {"output_text": "OK"},
+            )()
+
+        def _chat_create(self, **kwargs):
+            request_history.append(("chat", kwargs))
+            raise Exception("Error code: 404 - page not found")
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+
+    response = client.post(
+        "/api/settings/ai/test",
+        json={
+            "OPENAI_API_KEY": "demo",
+            "OPENAI_BASE_URL": "https://example.com/v1/",
+            "OPENAI_MODEL_NAME": "demo-model",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["response"] == "OK"
+    assert request_history[0][0] == "chat"
+    assert request_history[0][1]["messages"][0]["content"] == settings.AI_TEST_PROMPT
+    assert request_history[1][0] == "responses"
+    assert request_history[1][1]["input"][0]["content"][0]["text"] == settings.AI_TEST_PROMPT

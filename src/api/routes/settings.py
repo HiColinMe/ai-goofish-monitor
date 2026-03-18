@@ -15,7 +15,14 @@ from src.infrastructure.config.settings import (
     reload_settings,
     scraper_settings,
 )
-from src.services.ai_request_compat import build_responses_input
+from src.services.ai_request_compat import (
+    CHAT_COMPLETIONS_API_MODE,
+    RESPONSES_API_MODE,
+    build_ai_request_params,
+    create_ai_response_sync,
+    is_chat_completions_api_unsupported_error,
+    is_responses_api_unsupported_error,
+)
 from src.services.ai_response_parser import extract_ai_response_content
 from src.services.notification_config_service import (
     NotificationSettingsValidationError,
@@ -71,6 +78,7 @@ class NotificationSettingsModel(BaseModel):
     WX_BOT_URL: Optional[str] = None
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
+    TELEGRAM_API_BASE_URL: Optional[str] = None
     WEBHOOK_URL: Optional[str] = None
     WEBHOOK_METHOD: Optional[str] = None
     WEBHOOK_HEADERS: Optional[str] = None
@@ -291,13 +299,34 @@ async def test_ai_settings(settings: dict):
 
         model_name = settings.get("OPENAI_MODEL_NAME", "")
         client = OpenAI(**client_params)
-        response = client.responses.create(
-            model=model_name,
-            input=build_responses_input(
-                [{"role": "user", "content": AI_TEST_PROMPT}]
-            ),
-            max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
-        )
+        messages = [{"role": "user", "content": AI_TEST_PROMPT}]
+        api_mode = CHAT_COMPLETIONS_API_MODE
+
+        try:
+            response = create_ai_response_sync(
+                client,
+                api_mode,
+                build_ai_request_params(
+                    api_mode,
+                    model=model_name,
+                    messages=messages,
+                    max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
+                ),
+            )
+        except Exception as exc:
+            if not is_chat_completions_api_unsupported_error(exc):
+                raise
+            api_mode = RESPONSES_API_MODE
+            response = create_ai_response_sync(
+                client,
+                api_mode,
+                build_ai_request_params(
+                    api_mode,
+                    model=model_name,
+                    messages=messages,
+                    max_output_tokens=AI_TEST_MAX_OUTPUT_TOKENS,
+                ),
+            )
 
         return {
             "success": True,
